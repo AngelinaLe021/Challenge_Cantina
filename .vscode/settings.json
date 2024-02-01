@@ -3,6 +3,8 @@
         "string": "cpp",
         "codecvt": "cpp",
         "ostream": "cpp",
-        "iostream": "cpp"
+        "iostream": "cpp",
+        "vector": "cpp",
+        "new": "cpp"
     }
 }

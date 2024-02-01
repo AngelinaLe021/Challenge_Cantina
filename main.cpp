@@ -12,108 +12,63 @@
 
 using namespace std;
 
-struct Packet {
+// Client connection to already Established server
+/* 
+I. SYN
+    1. Create Client socket connection
+    2. Prep Server -> Structure to handling internet addresses
+        i. Get IPv4 Address from host name 
+            a. Can only process when it's in ddd.ddd.ddd.ddd form from IPv4, and x:x:x:x:x:x:x:x form for IPv6 -> need conversion from challenge.cantina.ai
+        i. Assign server family (sin_family) to ipv4
+        ii. Assign server port (sin_port) to given port
+        iii. Converting server address from string to binary form if not already in binary form
+    3. Connect to Server
+    4. Handle the handshake package from Server
+II. SYN + ACK
+    1. Extracting needed information from the Server packet 
+    2. Store the needed info in a string for Identification packet
+    3. Send the Identification packet back to the server
+III. ACK
+    1. When the server finished identify the client from Identification packet which outout the success message
+    2. Start downloading the data
+IV. Processing data:
+    1. Open a file called sortedData.bin to store the streaming data
+    2. As the data coming in, perform XOR CHK and only stored the corrected data that's pass
+        i. Setting the structure of the PacketHeader to identify the firts known 12 bytes
+        ii. Received the data from server and check whether or not there are data
+        iii. Setting SEQ, CHK and LEN in PacketHeader structure to be unsigned 32bits (4bytes) with the data coming in
+        iv. Checking whether or not client pulled in all data since this is not an async recv in the while-loop
+            a. Break out of loop when there's no more data present.
+        v. Performing XOR CHK between SEQ and Data
+            a. Padding (0xAB) needed when LEN % 4 != 0
+        vi. When the calculated XOR CHK and the given CHK are the same, write to the file 
+        v. Delete the datdBuffer when finish with the packet to free the memory
+
+        Note: Then loop will keep going until there's no more corrected data to be added in
+
+    3. Close the file to make sure all the data has been written in there
+V. Close client socket when finish
+ * */
+
+// Structure of the header packet when receiving raw data
+struct PacketHeader {
     uint32_t seq; 
     uint32_t chk;
     uint32_t len;
-    vector<uint8_t> raw;
-};
-
-uint32_t convertSEQtoBigEndian(uint32_t value) {
-	return ((value >> 24) & 0xFF) | ((value >> 8) & 0xFF00) | ((value << 8) & 0xFF0000) | (value << 24);
-}
-
-void extractingProcessedData(vector<Packet> satellitePacket) {
-	for(int i = 0; i < satellitePacket.size(); i++){
-		uint32_t seq = convertSEQtoBigEndian(satellitePacket[i].seq);
-		int size = (satellitePacket[i].raw).size();
-		vector<uint8_t> raw;
-		raw.resize(size);
-		raw = satellitePacket[i].raw;
-		uint32_t checksum = seq;
-		
-		// Calculated CHK between SEQ and RAW at i-pos in vector<Packet>
-		for(int j = 0; j < sizeof(satellitePacket[i]); j++){
-			uint32_t chunk = 0; 
-			for(int k = 0; k < 4 && (k + j) < raw.size(); k++){
-				chunk |= raw[j + k] << (k * 8); 
-			}
-			checksum ^= chunk;
-		}
-		
-		uint32_t givenCHK = satellitePacket[i].chk;
-		
-		ofstream processedData;
-			processedData.open("sortedData.bin", ios::binary | ios::out);
-			if(!processedData.is_open()) {
-				cerr << "Failed to open file." << endl;
-				break;
-			}
-			
-			while(true) {
-				if(givenCHK == checksum) {
-					for(int h = 0; h < raw.size(); h++){
-						processedData << raw[h];
-					}
-				}
-				else {
-					processedData.close();
-				}
-			}
-	}
-}
-
-vector<Packet> extractingRawData(const string dataContents){
-	 int headerSize = 3 * sizeof(uint32_t);
-	 
-	 vector<Packet> packets;
-	 
-	for (int i = 0; i < dataContents.size(); ) {
-		Packet packet;
-		 
-		packet.seq = i;
-		packet.chk = i + 1;
-		packet.len = *reinterpret_cast<const uint32_t*>(dataContents.data() + i + 2);
-	
-		i += headerSize;
-		
-		packet.raw.resize(packet.len); // resize raw vector
-		memcpy(packet.raw.data(), dataContents.data() + i, packet.len); //copy data from string to raw vector
-		
-		int remainder = packet.len % 4; // Check for remainder and perform padding
-		if(remainder > 0) {
-			int newSize = 0;
-			packet.raw.resize(packet.len + remainder, 0xAB);
-			newSize = packet.raw.size();
-
-			uint32_t lastChunk = 0;
-			for(int j = 0; j < 4; j++){
-				lastChunk |= 0xAB << (j * 8);
-			}
-			packet.raw.push_back(lastChunk);
-			i += newSize;
-		}
-		else {
-			i += packet.len;
-		}
-		
-		packets.push_back(packet);
-	}
-	
-	return packets;
-}
-
+} header;
 
 int main() {
     const int servPort = 2323;
     const string email = "angelinale021@gmail.com";
 
+    // Create Client Socket
     int clientSock = socket(AF_INET, SOCK_STREAM, 0);
     if(clientSock == -1) {
         perror("No socket created.");
         return -1;
     }
 
+    // Obtain IP address from "challenge.cantina.ai"
     struct hostent *serverHost;
     serverHost = gethostbyname("challenge.cantina.ai");
     if(serverHost == NULL) {
@@ -124,105 +79,88 @@ int main() {
     char ipAddress[INET_ADDRSTRLEN];
     const char* serverIp = inet_ntop(AF_INET, (struct in_addr*)(serverHost->h_addr_list[0]), ipAddress, sizeof(ipAddress));
 
-    // cout << serverIp << endl;
-
     struct sockaddr_in serverAddr;
 
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(servPort);
+    serverAddr.sin_family = AF_INET; //  Setting as IPv4
+    serverAddr.sin_port = htons(servPort); // Port given
 
+    // Converting txt address to bin form
     if(inet_pton(AF_INET, serverIp, &serverAddr.sin_addr) <= 0){
         cerr << "Invalid Server IP / Server IP not found." << endl;
         return 1;
     }
 
+    // Connect to server
     int serverConnect = connect(clientSock, (struct sockaddr *)&serverAddr, sizeof(serverAddr));
     if(serverConnect < 0) {
         cerr << "Connection Failed" << endl;
     }
 
-    char serverPacket[256]; // WHORU:722887867
+    // Read the handshake package from server
+    char serverPacket[256]; 
     int byteCount = recv(clientSock, serverPacket, sizeof(serverPacket), 0);
     if(byteCount == -1) {
         cerr << "Error Receiving Data." << endl;
         return 1;
     }
 
+    // NULL Termination
     serverPacket[byteCount] = '\0';
-    // cout << serverPacket << endl;
-
+    
+    // Extracting Challenge Number
     string challengeNum; 
     for(int i = 6; serverPacket[i] != '\n'; i++){
         challengeNum += serverPacket[i];
     }
-    // cout << challengeNum << endl;
 
-
+    // Sending back to server Identification Packet
     string identifyPacket = "IAM:" + challengeNum + ":" + email + ":at\n";
     send(clientSock, identifyPacket.c_str(), identifyPacket.length(), 0);
     char buffer[1024];
-    recv(clientSock, buffer, sizeof(buffer), 0); // SUCCESS:151536
-    // cout << dataRead << endl;
-    // cout << buffer << endl;
+    recv(clientSock, buffer, sizeof(buffer), 0); // SUCCESS 151536
 
-    // string dataContents;
-    // cout << dataContents << endl;
-
-    ofstream dataDump;
-        dataDump.open("satData.bin", ios::binary | ios::out);
-        if(!dataDump.is_open()) {
-            cerr << "File is not open." << endl;
-            return -1;
-        };
-        
-        while(true) {
-            char dataStream[4096];
-            int dataBytes = read(clientSock, dataStream, sizeof(dataStream));
-            if(dataBytes == 0) {
-                perror("Connection closed.");
-                break;
-            } else if(dataBytes < 0) {
-                cerr << "No data found." << endl;
-                break;
-            } else {
-                buffer[dataBytes] = '\0';
-                dataDump.write(dataStream, dataBytes);
-            }
-        };
-
-        // while(true) {
-        //     string dataStr;
-        //     char ch;
-        //     while(dataDump.get(ch)) {
-        //         dataStr += ch;
-        //     }
-        // }
-
-    close(clientSock); 
-    dataDump.close();
-
-    ifstream dataContents;
-        dataContents.open("satData.bin");
-        if(!dataContents.is_open()) {
-            cerr << "Cannot read file." <<  endl;
-            return -1;
+    // Open file and processing incoming data
+    ofstream ofile("sortedData.bin", ios::binary);
+    while(true) {
+        memset(&header, 0, sizeof(PacketHeader)); // Setting Packet Header
+        int bytesReceived = recv(clientSock, reinterpret_cast<char*>(&header), sizeof(PacketHeader), 0); // Receiving data
+        if(bytesReceived <= 0) {
+            break; // stop receiving if no data
         }
 
-        while(true) {
-            string dataStr;
-            char ch;
-            while(dataContents.get(ch)) {
-                dataStr += ch;
+        uint32_t seq = ntohl(header.seq);
+        uint32_t chk = ntohl(header.chk);
+        uint32_t len = ntohl(header.len);
+
+        char* dataBuffer = new char[len];
+        int totalDataBytesReceived = 0;
+
+        // Since recv is not async, this while-loop makes sure all raw data are pulling in the the size of LEN 
+        while(totalDataBytesReceived < len) {
+            bytesReceived = recv(clientSock, dataBuffer + totalDataBytesReceived, len - totalDataBytesReceived, 0);
+            if(bytesReceived <= 0) {
+                break;
             }
-
-            vector<Packet> splittingData = extractingRawData(dataStr);
-
-
-            // cout << dataStr << endl;
+            totalDataBytesReceived += bytesReceived;
         }
-    
-    dataContents.close();
-    dataDump.close();
+
+        // XOR CHK with big endian SEQ
+        uint32_t calculatedChk = seq;
+        for (size_t i = 0; i < len; i += 4) {
+            uint32_t data = (len - i < 4) ? 0xABABABAB : *(reinterpret_cast<uint32_t*>(dataBuffer+i));
+            calculatedChk ^= ntohl(data);
+        }
+
+        // Checksum is correct -> write ti file
+        if (calculatedChk == chk) {
+            ofile.write(dataBuffer, len);
+        }
+
+        delete[] dataBuffer;
+    }
+
+    ofile.close();
+    close(clientSock);
 
     return 0;
 }
